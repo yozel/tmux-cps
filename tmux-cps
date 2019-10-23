@@ -1,0 +1,119 @@
+#!/bin/sh
+
+###############################################
+# Based on https://github.com/zinic/tmux-cssh #
+###############################################
+
+hosts=""
+kube_exec_options=""
+tmux_name="cps"
+shell_process="bash"
+
+usage() {
+    echo "Usage: $0 [options] [host ...]" >&2
+    echo "" >&2
+    echo 'Spawns multiple synchronized `kubectl exec [-n namespace] [-c contaier_name] [options] -it {pod_name} [shell]` sessions inside a tmux session.' >&2
+    echo '' >&2
+    echo 'Options:' >&2
+    echo '  -h                     Show help' >&2
+    echo '  -s <shell>             Shell process (default: bash)' >&2
+    echo '  -n <namespace>         Kubernetes namespace' >&2
+    echo '  -c <container>         Container name' >&2
+    echo '  -l <label_selector>    Label selector (only effective if pod names are not given)' >&2
+    echo '  -o <options>           Additional `kube exec` arguments' >&2
+    echo "Examples:" >&2
+    echo "  $0 testapp-7987c95b6c-z5hq4 testapp-7987c95b6c-rn9l6" >&2
+    echo "  $0 -c nginx testapp-7987c95b6c-z5hq4 testapp-7987c95b6c-rn9l6" >&2
+    echo "  $0 -l release=testapp" >&2
+    echo "  $0 -l release=testapp -s sh" >&2
+    echo "  $0 -l release=testapp -n production" >&2
+}
+
+while [ $# -ne 0 ]; do
+    case $1 in
+        -s)
+            shift;
+            if [ $# -eq 0 ]; then
+                usage
+                exit 2
+            fi
+            shell_process="$1"; shift
+            ;;
+        -n)
+            shift;
+            if [ $# -eq 0 ]; then
+                usage
+                exit 2
+            fi
+            kube_exec_options="${kube_exec_options} -n $1"; shift
+            ;;
+        -c)
+            shift;
+            if [ $# -eq 0 ]; then
+                usage
+                exit 2
+            fi
+            kube_exec_options="${kube_exec_options} -c $1"; shift
+            ;;
+        -l)
+            shift;
+            if [ $# -eq 0 ]; then
+                usage
+                exit 2
+            fi
+            label_selector="$1"; shift
+            ;;
+        -o)
+            shift;
+            if [ $# -eq 0 ]; then
+                usage
+                exit 2
+            fi
+            kube_exec_options="$1"; shift
+            ;;
+        -h)
+            usage
+            exit 0
+            ;;
+        -*)
+            usage
+            exit 2
+            ;;
+        *)
+            hosts="${hosts} $1"; shift
+            ;;
+    esac
+done
+
+if [ -z "${hosts}" ]; then
+    hosts="$(kubectl get pod -l ${label_selector} -o=name)"
+fi
+# Find a name for a new session
+n=0; while tmux has-session -t "${tmux_name}-${n}" 2>/dev/null; do n=$(($n + 1)); done
+tmux_session="${tmux_name}-${n}"
+
+# Open a new session and split into new panes for each kube exec session
+for host in ${hosts}; do
+    exec_cmd="kubectl exec ${kube_exec_options} -it ${host} ${shell_process}"
+    if ! tmux has-session -t "${tmux_session}" 2>/dev/null; then
+        tmux new-session -s "${tmux_session}" -d "${exec_cmd}"
+    else
+        tmux split-window -t "${tmux_session}" -t ${tmux_window} -d "${exec_cmd}"
+        # We have to reset the layout after each new pane otherwise the panes
+        # quickly become too small to spawn any more
+        tmux select-layout -t "${tmux_session}" tiled
+    fi
+done
+
+# Synchronize panes by default
+tmux set-window-option -t "${tmux_session}" synchronize-panes on
+
+if [ -n "${TMUX}" ]; then
+    # We are in a tmux, just switch to the new session
+    tmux switch-client -t "${tmux_session}"
+else
+    # We are NOT in a tmux, attach to the new session
+    tmux attach-session -t "${tmux_session}"
+fi
+
+exit 0
